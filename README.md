@@ -82,41 +82,14 @@ The project integrates multiple remote sensing products to generate GIS-ready ra
 
 ---
 
-## Repository Structure
-
-```text
-SF-Urban-Tree-Canopy/
-│
-├── README.md
-├── LICENSE
-│
-├── docs/
-│   ├── methodology.md
-│   ├── workflow.md
-│   └── metadata.md
-│
-├── figures/
-│
-├── scripts/
-│   ├── gee/
-│   ├── exploratory/
-│   ├── python/
-│   └── r/
-│
-├── outputs/
-│
-└── data/
-```
-
----
-
 ## Data Sources
 
-### Remote Sensing
+### Raster Data
 
 - Sentinel-2 Harmonized Surface Reflectance
 - USDA National Agriculture Imagery Program (NAIP)
 - USGS LiDAR-derived Height Above Ground raster
+- LiDAR height data were obtained from [Zenodo](https://doi.org/10.5281/zenodo.15443630)
 
 ### Vector Data
 
@@ -135,6 +108,7 @@ The workflow produces:
 - GIS-ready shapefiles
 - Vegetation area estimates
 - Tree canopy area estimates
+- Web app [ArcGIS Online](https://osugisci.maps.arcgis.com/apps/instant/basic/index.html?appid=5a65c8f27f9e48cbbaf1cb72cdf1e308)
 
 ---
 
@@ -156,11 +130,5 @@ Output rasters can be exported directly to ArcGIS Pro or other GIS software for 
 - Additional accuracy assessment
 - Species-specific vegetation classification
 - Integration with additional remote sensing products
-
----
-
-## License
-
-This repository is released under the MIT License.
 
 ---
