@@ -1,0 +1,385 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var geometry = 
+    /* color: #d63000 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-122.50212927594356, 37.463598859611984],
+          [-122.50212927594356, 36.60414023514535],
+          [-121.24144812359981, 36.60414023514535],
+          [-121.24144812359981, 37.463598859611984]]], null, false),
+    geometry2 = 
+    /* color: #d63000 */
+    /* shown: false */
+    ee.Geometry.Polygon(
+        [[[-122.3239447666664, 37.29290587122963],
+          [-122.40222235455703, 37.29290587122963],
+          [-122.40977545514296, 37.25137867223815],
+          [-122.39810248151015, 37.19943746993697],
+          [-122.37544317975234, 37.18576278744734],
+          [-122.35484381451796, 37.1616893316362],
+          [-122.34523077740859, 37.14472388252589],
+          [-122.32875128522109, 37.130491861234276],
+          [-122.29716559186171, 37.11789976466378],
+          [-122.25596686139296, 37.07956310474779],
+          [-122.23124762311171, 37.046687673259754],
+          [-122.19142218365859, 37.014894548884094],
+          [-122.10490484967421, 36.98144259557356],
+          [-121.98817511334609, 37.024214602005806],
+          [-121.95727606549453, 37.20764109059109],
+          [-122.1042182041664, 37.28525784521805],
+          [-122.1426703526039, 37.29235960943866]]]),
+    image = ee.Image("projects/ee-harpecas/assets/CHM_SF_2m");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+// San Francisco Urban Tree Canopy Estimate 2022
+// 
+// Author: Casey Harper  
+// 
+// Description: 
+//      Calculate Urban Tree Canopy (UTC) estimate for San Francisco from NAIP and LiDAR data
+// NOTES: CURRENTLY MESSING WITH NDVI THRESHOLD AND CANOPY HEIGHT VALUES
+
+
+// ***************************************************************
+
+// Set geometry for the city of San Francisco
+var sf = ee.FeatureCollection("TIGER/2018/Counties") // city and county of SF have same spatial extent
+            .filter(ee.Filter.eq('NAME', 'San Francisco')); 
+
+// Filter out Farallon Islands from sf geometry
+var sfMainland = sf.geometry().dissolve().buffer(-1000).buffer(1000); //do not want to include offshore islands in estimate
+            
+// Load NAIP imagery for 2022 and clip to study area
+var naip2022 = ee.ImageCollection('USDA/NAIP/DOQQ')
+  .filterBounds(sfMainland)
+  .filterDate('2022-05-01', '2022-09-30')  // NAIP 2022 season
+  .mosaic()  // combine into one image
+  .clip(sfMainland); // clip to San Francisco
+
+// // Check available bands (NAIP is usually: R, G, B, NIR)
+// print('NAIP 2022 bands:', naip2022.bandNames());
+
+// Add to map
+Map.centerObject(sfMainland, 12);
+Map.addLayer(naip2022, {bands: ['R', 'G', 'B'], min: 0, max: 255}, 'NAIP 2022 RGB');
+
+// Calculate NDVI: (NIR - Red) / (NIR + Red)
+// NAIP band names: ['R', 'G', 'B', 'N']
+var ndvi = naip2022.normalizedDifference(['N', 'R']).multiply(1000).toInt().rename('NDVI');
+
+// Add NDVI 2022 to map
+Map.addLayer(ndvi, {min: 0, max: 1000, palette: ['white', 'green']}, 'NDVI Raw 2022');
+
+// Load Canopy Height Model (CHM) derived from San Francisco LiDAR 2023 dataset
+var chm = ee.Image("projects/ee-harpecas/assets/CHM_SF_2m")
+             .clip(sfMainland);
+             
+// Convert CHM into classes (1: <1 ft, 2: 1–8 ft, 3: >8 ft) //actual code in meters
+var class1 = chm.lt(0.3); // <1 foot
+var class2 = chm.gte(0.3).and(chm.lte(2.438)); // 1–8 feet
+var class3 = chm.gt(2.438); // >8 feet
+
+// Combine into one image with values 1, 2, or 3
+var chmClassified = class1.multiply(1)
+                     .add(class2.multiply(2))
+                     .add(class3.multiply(3))
+                     .rename('CHM_Class');
+
+// Define a color palette for visualization
+var palette = ['gray', 'yellow', 'green']; // class 1 = gray, 2 = yellow, 3 = green
+
+Map.addLayer(chmClassified, {min: 1, max: 3, palette: palette}, 'CHM Height Classes');
+
+// Reclassify NDVI into binary categories
+
+// NDVI classification 200 selected as vegetation threshold
+var ndviClass = ndvi.gt(50).rename('VegetationMask');  // 1 = vegetation, 0 = non-vegetation
+
+// Visualization
+Map.addLayer(ndviClass.updateMask(ndviClass), {palette: ['green']}, 'NDVI > 100 (Vegetation)');
+// Map.addLayer(ndviClass.updateMask(ndviClass.not()), {palette: ['gray']}, 'NDVI ≤ 200 (Non-Vegetation)');
+
+// Define CHM height threshold for trees (>8 ft = 2.4 meters)
+var isTall = chm.gt(2.438); // to eliminate "field goal effect", tall sports equip. in green fields returning FPs
+
+// Define NDVI threshold for vegetation (>100)
+var isVegetation = ndvi.gt(50);
+
+// Combine both: NDVI > 100 AND CHM > 8 ft
+var treeCanopyMask = isVegetation.and(isTall);
+
+// Convert mask into binary band
+// treeCanopyBinary is a binary raster (1 = tree, 0 or masked = no tree)
+var treeCanopyBinary = treeCanopyMask
+  .unmask(0)       // fill in non-canopy areas with 0
+  .rename('prediction');
+
+// Apply mask to NDVI
+var treeCanopyNDVI = ndvi.updateMask(treeCanopyMask);
+
+// Visualize
+Map.addLayer(treeCanopyNDVI, {min: 0, max: 1, palette: ['white', 'green']}, 'High-Confidence Tree Canopy');
+
+// Add Reference Points
+// var known_trees = ee.FeatureCollection('projects/ee-harpecas/assets/Random_Trees_10inch');
+// Map.addLayer(known_trees, {color: 'FF11FF'}, 'SF Tree Points'); // Radom sample of 200 trees from SF public works street tree map
+
+// var not_trees = ee.FeatureCollection('projects/ee-harpecas/assets/NonTreeRandomPtsUpdated');
+// Map.addLayer(not_trees, {color: 'f8e32e'}, 'Not Trees'); // 200 random hand drawn points of no known trees within SF
+
+//Sample the canopy mask at each tree point
+//treeCanopyMask is a binary raster (1 = tree, 0 or masked = no tree)
+// var sampled = treeCanopyMask.sampleRegions({
+//   collection: known_trees,
+//   properties: [],
+//   scale: 1,
+//   geometries: true
+// });
+
+// Combine both sets of points into validation point set
+// var labeledTrees = known_trees.map(function(f) {
+//   return f.set('truth', 1);
+// });
+// var labeledNonTrees = not_trees.map(function(f) {
+//   return f.set('truth', 0);
+// });
+
+// var validationPoints = labeledTrees.merge(labeledNonTrees);
+
+// var treeCanopyMaskImage = treeCanopyMask.rename('prediction');
+
+//Sample canopy mask and create confusion matrix
+// var predictions = treeCanopyBinary.sampleRegions({
+//   collection: validationPoints,
+//   properties: ['truth'],
+//   scale: 1,
+//   geometries: true
+// }).map(function(f) {
+//   var pred = ee.Number(f.get('prediction')).int();
+//   var truth = ee.Number(f.get('truth')).int();
+//   return f.set('truth', truth).set('prediction', pred);
+// });
+
+
+// print('Truth histogram:', predictions.aggregate_histogram('truth'));
+// print('Prediction histogram:', predictions.aggregate_histogram('prediction'));
+
+
+// // Compute confusion matrix
+// var confusion = predictions.errorMatrix('truth', 'prediction');
+// print('Confusion Matrix:', confusion);
+// print('Accuracy:', confusion.accuracy());
+
+// ***************************************************************
+
+// Create variables to visualize True/False Positives/Negatives
+
+// False positives: predicted = 1, truth = 0
+// var falsePositives = predictions.filter(ee.Filter.and(
+//   ee.Filter.eq('prediction', 1),
+//   ee.Filter.eq('truth', 0)
+// ));
+
+// False negatives: predicted = 0, truth = 1
+// var falseNegatives = predictions.filter(ee.Filter.and(
+//   ee.Filter.eq('prediction', 0),
+//   ee.Filter.eq('truth', 1)
+// ));
+
+// True positives and true negatives (optional, commented out for now)
+// var truePositives = predictions.filter(ee.Filter.and(
+//   ee.Filter.eq('prediction', 1),
+//   ee.Filter.eq('truth', 1)
+// ));
+
+// var trueNegatives = predictions.filter(ee.Filter.and(
+//   ee.Filter.eq('prediction', 0),
+//   ee.Filter.eq('truth', 0)
+// ));
+
+//Add to Map
+// Map.addLayer(falsePositives, {color: 'orange'}, 'False Positives (non-tree misclassified)');
+// Map.addLayer(falseNegatives, {color: 'red'}, 'False Negatives (missed trees)');
+// Map.addLayer(truePositives, {color: 'green'}, 'True Positives');
+// Map.addLayer(trueNegatives, {color: 'blue'}, 'True Negatives');
+
+// // ***************************************************************
+
+// Export Tree Canopy Layer products
+
+// convert raster to vector
+var treeCanopyVector = treeCanopyMask
+  .selfMask()  // mask out 0s so only 1s are converted
+  .reduceToVectors({
+    geometry: sfMainland,      // Clip to study area
+    scale: 2,                  // Use 2m resolution (or 1m if manageable)
+    geometryType: 'polygon',
+    labelProperty: 'canopy',
+    maxPixels: 1e10,
+    reducer: ee.Reducer.countEvery()
+  });
+
+// Export to Google Drive as shp file (once generated commenting out)
+Export.table.toDrive({
+  collection: treeCanopyVector,
+  description: 'HighConfidenceTreeCanopy',
+  fileFormat: 'SHP'
+});
+
+// Export to Google Drive as GeoTIFF (once generated commenting out)
+Export.image.toDrive({
+  image: treeCanopyBinary,
+  description: 'HighConfidenceTreeCanopy_TIFF',
+  folder: 'EarthEngineExports',     // optional: creates subfolder in your Drive
+  fileNamePrefix: 'tree_canopy_2023',
+  region: sfMainland,               // geometry for export
+  scale: 1,                         // native resolution (1m CHM)
+  crs: 'EPSG:7131',                 // CHM CRS (NAD 1983 (2011) San Francisco CS13)
+  maxPixels: 1e13
+});
+
+
+// Calculate Urban Tree Canopy estimate
+// 1. Image of pixel area in m², masked to tree canopy only
+var pixelArea = ee.Image.pixelArea().updateMask(treeCanopyMask);
+
+// 2. Total tree canopy area in m² over SF mainland
+var canopyArea_m2 = pixelArea.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: sfMainland,
+  scale: 1,  // match CHM/NAIP resolution
+  maxPixels: 1e10
+});
+
+// 3. Convert to acres (1 acre = 4046.8564224 m²)
+var canopyArea_acres = ee.Number(canopyArea_m2.get('area')).divide(4046.8564224);
+
+print('Urban Tree Canopy Area (m²):', canopyArea_m2.get('area'));
+print('Urban Tree Canopy Area (acres):', canopyArea_acres);
+
+
+// // ***************************************************************
+// APPENDIX CODE SNIPPETS BELOW
+
+// Convert NDVI canopy mask to binary (1 = tree canopy, 0 = else)
+// var binaryCanopy = treeCanopyMask.selfMask();  // selfMask hides 0s
+
+// Vectorize raster canopy regions (reduce to polygons)
+// var canopyPolygons = binaryCanopy.reduceToVectors({
+//   geometry: sfMainland,
+//   geometryType: 'polygon',
+//   scale: 1,
+//   maxPixels: 1e10,
+//   labelProperty: 'tree',
+//   reducer: ee.Reducer.countEvery()
+// });
+
+// // Export as shapefile to Google Drive
+// Export.table.toDrive({
+//   collection: canopyPolygons,
+//   description: 'SF_TreeCanopy_Polygons',
+//   fileFormat: 'SHP'
+// });
+
+// Calculate total canopy area in square meters
+// var pixelArea = ee.Image.pixelArea().updateMask(treeCanopyMask);
+// var totalCanopyArea = pixelArea.reduceRegion({
+//   reducer: ee.Reducer.sum(),
+//   geometry: sfMainland,
+//   scale: 1,
+//   maxPixels: 1e10
+// });
+
+// var canopyArea = canopyPolygons.geometry().area();  // m²
+// var totalArea = 121400000;                  // m²
+
+// var percentCanopy = canopyArea.divide(totalArea).multiply(100);
+// print('Tree canopy cover % (by polygon area):', percentCanopy);
+
+
+// print('Total tree canopy area (sq meters):', totalCanopyArea);
+
+// // Get San Francisco land area
+// var sfArea = sfMainland.area();  // in square meters
+
+// // Compute percent cover
+// var percentCanopy = ee.Number(totalCanopyArea.get('area')).divide(sfArea).multiply(100);
+// print('Percent tree canopy cover:', percentCanopy);
+
+// // Mask NDVI to only Class 3 (tall vegetation above 8ft)
+// var ndviMaskedToTrees = ndvi.updateMask(chmClassified.eq(3));
+
+// // Visualization: NDVI only where vegetation is >8 ft
+// Map.addLayer(ndviMaskedToTrees, 
+//   {min: 0, max: 1, palette: ['white', 'green']}, 
+//   'NDVI (only >8 ft CHM)');
+
+// //Exclude non-vegetation from CHM derived height classes
+// var maskedCHMClasses = chmClassified.updateMask(ndviClass);
+// Map.addLayer(maskedCHMClasses, {min: 1, max: 3, palette: ['gray', 'yellow', 'green']}, 'Vegetated CHM Classes');
+
+
+// // Remove shadows from NAIP imagery by adding a threshold for darkness and NDVI
+// // NAIP values = 0-255
+// var lowBrightness = naip2022.select(['R', 'G', 'B']).reduce(ee.Reducer.mean()).lt(60);
+// var lowNDVI = ndvi.lt(0.2);
+// var shadowMask = lowBrightness.and(lowNDVI);
+
+// // Apply shadow mask to NDVI (i.e., mask shadows out)
+// var ndviNoShadow = ndvi.updateMask(shadowMask.not());
+
+// // Visualize shadow mask to see what's being excluded
+// Map.addLayer(shadowMask.updateMask(shadowMask), {palette: ['black']}, 'Shadow Mask');
+
+// // Add Masked NDVI to map
+// Map.addLayer(ndviNoShadow, {min: 0, max: 1, palette: ['white', 'green']}, 'NDVI Masked 2022');
+
+// // Repeat steps for 2010
+// // Load NAIP imagery for 2010 and clip to study area
+// var naip2010 = ee.ImageCollection('USDA/NAIP/DOQQ')
+//   .filterBounds(sf)
+//   .filterDate('2010-05-01', '2022-09-30')  // NAIP 2010 season
+//   .mosaic()  // combine into one image
+//   .clip(sf); // clip to San Francisco
+
+// // NAIP 2010 band names: R, G, B, N
+// // Add to map
+// Map.centerObject(sf, 12);
+// Map.addLayer(naip2010, {bands: ['R', 'G', 'B'], min: 0, max: 255}, 'NAIP 2010 RGB');
+
+// // Calculate NDVI: (NIR - Red) / (NIR + Red)
+// // NAIP band names: ['R', 'G', 'B', 'N']
+// var ndvi2010 = naip2010.normalizedDifference(['N', 'R']).multiply(1000).toInt().rename('NDVI2010');
+
+// // Add NDVI 2010 to map
+// Map.addLayer(ndvi2010, {min: 0, max: 1, palette: ['white', 'green']}, 'NDVI Raw 2010');
+
+// // Remove shadows from NAIP imagery by adding a threshold for darkness and NDVI
+// // NAIP values = 0-255
+// var lowBrightness2010 = naip2010.select(['R', 'G', 'B']).reduce(ee.Reducer.mean()).lt(60);
+// var lowNDVI2010 = ndvi.lt(0.2);
+// var shadowMask2010 = lowBrightness2010.and(lowNDVI2010);
+
+// // Apply shadow mask to NDVI (i.e., mask shadows out)
+// var ndviNoShadow2010 = ndvi2010.updateMask(shadowMask.not());
+
+// // Visualize shadow mask to see what's being excluded
+// Map.addLayer(shadowMask.updateMask(shadowMask), {palette: ['black']}, 'Shadow Mask 2010');
+
+// // Add Masked NDVI to map
+// Map.addLayer(ndviNoShadow2010, {min: 0, max: 1, palette: ['white', 'green']}, 'NDVI Masked 2010');
+
+// // Subtract NDVI
+// var diffBand = ndviNoShadow.subtract(ndviNoShadow2010);
+
+// var diffViz = {min:-1000, max:1000};
+// var BWViz = {min:0,max:1000};
+// // Add difference layer to map
+// Map.addLayer(diffBand, diffViz, 'Late minus early NDVI')
+
+
+// ***********************************************************************************************************

@@ -1,0 +1,153 @@
+// TOTAL VEGETATION ESTIMATE SF USING SENTINEL IMAGERY
+
+
+// 1. Load SF boundary
+var sf = ee.FeatureCollection("projects/ee-harpecas/assets/SF_City_Bounds");
+
+// 2. Define date range (May 2022)
+var startDate = ee.Date.fromYMD(2025, 3, 1);
+var endDate   = ee.Date.fromYMD(2025, 4, 30);
+
+// 3. Cloud‐masking function for Sentinel-2
+function maskS2clouds(img) {
+  var qa = img.select("QA60");
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var mask = qa.bitwiseAnd(1 << 10).eq(0)
+              .and(qa.bitwiseAnd(1 << 11).eq(0));
+  return img.updateMask(mask);
+}
+
+// 4. Load, mask clouds, compute NDVI, then median‐composite
+var s2 = ee.ImageCollection("COPERNICUS/S2_HARMONIZED")
+  .filterBounds(sf)
+  .filterDate(startDate, endDate) 
+  .map(maskS2clouds)
+  .map(function(img) {
+    var ndvi = img.normalizedDifference(["B8", "B4"]).rename("NDVI");
+    return img.addBands(ndvi);
+  });
+  
+
+// 5. Median NDVI
+var medianNDVI = s2.select("NDVI").median().clip(sf);
+
+// Metadata summary for image collection
+print('Sentinel-2 collection ID:', 'COPERNICUS/S2_HARMONIZED');
+print('Date range:', startDate.format('YYYY-MM-dd'), 'to', endDate.format('YYYY-MM-dd'));
+print('Number of images used:', s2.size());
+
+print('Image dates and cloud cover:', s2.aggregate_array('system:index')
+  .zip(s2.aggregate_array('CLOUDY_PIXEL_PERCENTAGE')));
+
+print('Mean cloud cover percentage:', s2.aggregate_mean('CLOUDY_PIXEL_PERCENTAGE'));
+print('Minimum cloud cover percentage:', s2.aggregate_min('CLOUDY_PIXEL_PERCENTAGE'));
+print('Maximum cloud cover percentage:', s2.aggregate_max('CLOUDY_PIXEL_PERCENTAGE'));
+
+print('NDVI native projection:', medianNDVI.projection());
+print('Export CRS:', 'EPSG:7131');
+print('Export pixel size:', '10 meters');
+print('Sentinel-2 B8 native projection:', s2.first().select('B8').projection());
+// 6. Visualize
+Map.centerObject(sf, 12);
+Map.addLayer(medianNDVI, 
+  {min: 0, max: 1, palette: ["white","green"]}, 
+  "Median NDVI");
+
+// 7. Create a binary vegetation mask (NDVI > 0.2)
+var vegMask = medianNDVI.gt(0.2);
+
+// Add map layer for masked vegetation areas
+Map.addLayer(vegMask.selfMask(), {palette: ['green']}, 'NDVI > threshold 0.2');
+
+// Load building footprints
+var bldg = ee.FeatureCollection('projects/ee-harpecas/assets/SF_Building_Footprints').filterBounds(sf)
+
+// Rasterize buildings to match the NDVI projection (10 m)
+var bldgRaster = ee.Image(0)
+  .byte()
+  .paint(bldg, 1)                    // 1 = building
+  .clip(sf);
+  
+// Visualize building footprints
+Map.addLayer(bldgRaster.selfMask(), {palette:["grey"]}, 'Buildings');
+  
+// Mask for "not a building"
+var notBuilding = bldgRaster.eq(0);
+
+// Apply both masks
+var vegMaskNoBldg = vegMask.and(notBuilding);
+
+// Add layer to map
+Map.addLayer(vegMaskNoBldg.selfMask(), {palette:['#2ca25f']}, 'Vegetation (no buildings)');
+
+// 8. Compute per-pixel area (m²) and mask to vegetation only
+var vegAreaImg = ee.Image.pixelArea()
+  .updateMask(vegMaskNoBldg)
+  .rename("vegArea");
+
+// 9. Sum vegArea over the city footprint at 10 m scale
+var result = vegAreaImg.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: sf.geometry(),
+  scale: 10,
+  maxPixels: 1e10
+});
+
+// 10. Extract and convert
+var areaSqM  = result.get("vegArea");
+var areaAcre = ee.Number(areaSqM).divide(4046.8564224);
+
+// 11. Print
+print("Total vegetation area (m²):", areaSqM);
+print("Total vegetation area (acres):", areaAcre);
+
+// Export products (Comment out if no need to export)
+
+// Format start and end dates for filenames (YYYYMMDD)
+var startStr = startDate.format('YYYYMMdd');
+var endStr   = endDate.format('YYYYMMdd');
+
+// Build dynamic file name prefix and description
+var exportName = ee.String('SF_VegArea_m2_').cat(startStr).cat('_to_').cat(endStr);
+
+// Export NDVI values with buildings masked out
+// bldgRaster: 1=building, 0=not building 
+var ndvi_no_bldg = medianNDVI.updateMask(bldgRaster.eq(0)).rename('NDVI').toFloat();
+Export.image.toDrive({
+  image: ndvi_no_bldg,
+  description: 'NDVI_noBuildings_' + startStr.getInfo() + '_to_' + endStr.getInfo(),
+  fileNamePrefix: 'NDVI_noBuildings_' + startStr.getInfo() + '_to_' + endStr.getInfo(),
+  region: sf.geometry(),
+  scale: 10,
+  crs: 'EPSG:7131',
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  formatOptions: {cloudOptimized: true}
+});
+
+// // --- Prep: area image (m²) and region/projection ---
+// var vegArea_m2 = ee.Image.pixelArea()
+//   .updateMask(vegMaskNoBldg)     // only where veg & not building
+//   .rename('veg_m2')
+//   .toFloat();                    // smaller on disk than double
+
+// var exportRegion = sf.geometry();
+// // var exportProj   = medianNDVI.projection(); // keeps 10 m S2 grid
+
+// // (Optional) acres per pixel
+// var vegArea_ac = vegArea_m2.multiply(1/4046.8564224).rename('veg_ac').toFloat();
+
+// // Export to Google Drive
+// Export.image.toDrive({
+//   image: vegArea_m2,                       // or vegArea_ac
+//   description: exportName.getInfo(),
+//   fileNamePrefix: exportName.getInfo(),
+//   region: exportRegion,
+//   scale: 10,
+//   crs: 'EPSG:7131',                 // (NAD 1983 (2011) San Francisco CS13)
+//   maxPixels: 1e13,
+//   fileFormat: 'GeoTIFF',
+//   formatOptions: {cloudOptimized: true},   // COG-friendly
+//   skipEmptyTiles: true
+// });
+
